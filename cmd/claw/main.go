@@ -1,3 +1,4 @@
+// cmd/claw/main.go
 package main
 
 import (
@@ -6,67 +7,40 @@ import (
 	"os"
 
 	"github.com/llxxgg/go-tiny-claw/internal/engine"
-	"github.com/llxxgg/go-tiny-claw/internal/schema"
+	"github.com/llxxgg/go-tiny-claw/internal/provider"
+	"github.com/llxxgg/go-tiny-claw/internal/tools"
 )
 
-// ==========================================
-// 1. 伪造的大模型 Provider
-// ==========================================
-type mockProvider struct {
-	turn int
-}
-
-// 模拟大模型的响应：第一轮请求执行 bash，第二轮输出最终结果
-func (m *mockProvider) Generate(ctx context.Context, msgs []schema.Message, _ []schema.ToolDefinition) (*schema.Message, error) {
-	m.turn++
-	if m.turn == 1 {
-		return &schema.Message{
-			Role:    schema.RoleAssistant,
-			Content: "让我来看看当前目录下有什么文件。",
-			ToolCalls: []schema.ToolCall{
-				{ID: "call_123", Name: "bash", Arguments: []byte(`{"command": "ls -la"}`)},
-			},
-		}, nil
-	}
-
-	return &schema.Message{
-		Role:    schema.RoleAssistant,
-		Content: "我看到了文件列表，里面包含 main.go，任务完成！",
-	}, nil
-}
-
-// ==========================================
-// 2. 伪造的 Tool Registry
-// ==========================================
-type mockRegistry struct{}
-
-func (m *mockRegistry) GetAvailableTools() []schema.ToolDefinition { return nil }
-
-func (m *mockRegistry) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
-	// 直接返回一段伪造的终端输出
-	return schema.ToolResult{
-		ToolCallID: call.ID,
-		Output:     "-rw-r--r--  1 user group  234 Oct 24 10:00 main.go\n",
-		IsError:    false,
-	}
-}
-
-// ==========================================
-// 3. 组装运行
-// ==========================================
 func main() {
-	// 获取当前执行目录作为 WorkDir 物理边界
+	if os.Getenv("MINIMAX_API_KEY") == "" {
+		log.Fatal("请先导出 MINIMAX_API_KEY 环境变量")
+	}
+
 	workDir, _ := os.Getwd()
+	workDir = workDir + "/workdir/"
 
-	p := &mockProvider{}
-	r := &mockRegistry{}
+	// 2. 初始化真实的大脑 (指向MiniMax-M2.7，使用上一讲的 OpenAI 适配器)
+	llmProvider := provider.NewMinimaxOpenAIProvider("MiniMax-M2.7")
+	registry := tools.NewRegistry()
 
-	// 实例化核心引擎
-	eng := engine.NewAgentEngine(p, r, workDir)
+	// 挂载极简工具集
+	registry.Register(tools.NewReadFileTool(workDir))
+	registry.Register(tools.NewWriteFileTool(workDir))
+	registry.Register(tools.NewBashTool(workDir))
 
-	// 发起任务指令
-	err := eng.Run(context.Background(), "帮我检查当前目录的文件")
+	// 实例化核心引擎，关闭慢思考阶段，享受 YOLO 急速模式
+	eng := engine.NewAgentEngine(llmProvider, registry, workDir, false)
+
+	// 发起一个需要连贯物理动作的任务
+	prompt := `
+    请帮我执行以下操作：
+    1. 用 bash 查看一下我当前电脑的 Go 版本。
+    2. 帮我写一个简单的 helloworld.go 文件，输出 "Hello, go-tiny-claw!"。
+    3. 用 bash 编译并运行这个 go 文件，确认它能正常工作。
+    `
+
+	err := eng.Run(context.Background(), prompt)
 	if err != nil {
-		log.Fatalf("引擎崩溃: %v", err)
+		log.Fatalf("引擎运行崩溃: %v", err)
 	}
 }
